@@ -1,0 +1,64 @@
+services:
+
+  emqx:
+    image: emqx/emqx:6.3
+    container_name: emqx_proy1
+    hostname: node1.emqx.com
+    environment:
+      EMQX_NODE_NAME: "emqx@node1.emqx.com" #importante para persistir los datos mnesia entre cada docker compose down y up (ver nota en obsidian MQTT/emqx/
+          # o sea la bd que guarda segun el nombre del nodo data/mnesia/<nombre_nodo> y si no se define uno docker le asigna uno random
+          # por eso entre diff docker compose up y down puede ser que ese nombre que asigna docker cambie, duplicando y perdiendo la bd
+      # brokers de Kafka para el conector (pisa el valor de emqx/base.hocon; las variables de entorno tienen la mayor precedencia)
+      # las comillas internas son necesarias: EMQX parsea el valor como HOCON y sin ellas la "," y los ":" lo rompen
+      EMQX_CONNECTORS__KAFKA_PRODUCER__KAFKA__BOOTSTRAP_HOSTS: '"${KAFKA_BOOTSTRAP_HOSTS:-kafka-1:9092,kafka-2:9092,kafka-3:9092}"'
+    ports:
+      - "1883:1883" # mqtt estandar, tcp
+      - "8083:8083" #mqtt sobre websocket, lo uso para testing rapido
+      - "18083:18083" # dashboard web
+    volumes:
+      - emqx_data:/opt/emqx/data #aca esta la bd mnesia/ (bd interna, con datos de authenticacion y auroizacion, usuarios del dashboard, alarmas), 
+                                  #configs/ (aca cambios hechos por API, CLI o Dashboard), authz/, certs/ y trace/
+      - emqx_log:/opt/emqx/log # logs que tira emqx aunque igual se ven en docker compose logs emqx
+      # puente MQTT -> Kafka (connector, action y regla) versionado en el repo
+      # es "base": lo que se cambie desde el dashboard queda en cluster.hocon (emqx_data) y lo pisa
+      - ./emqx/base.hocon:/opt/emqx/etc/base.hocon:ro
+    healthcheck:
+      test: ["CMD", "/opt/emqx/bin/emqx", "ctl", "status"]
+      interval: 5s
+      timeout: 20s
+      retries: 3
+    restart: unless-stopped
+
+  timescaledb:
+    image: timescale/timescaledb:${TIMESCALE_VERSION:?definir TIMESCALE_VERSION en el .env}
+    container_name: timescaledb
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?definir en .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?definir en .env}
+      POSTGRES_DB: ${POSTGRES_DB:-telemetria}
+    ports:
+      - "5432:5432"
+    volumes:
+      - timescale_data:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d:ro   # scripts .sql que corren SOLO con el volumen vacío
+    mem_limit: ${TIMESCALE_MEM_LIMIT:-512m}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+
+
+# Misma red que docker-compose.kafka.yml: en local el conector de EMQX usa
+# kafka-1:9092,kafka-2:9092,kafka-3:9092. En la exposición (Kafka en la VM)
+# usa la IP de Tailscale con los puertos 29092-29094.
+networks:
+  default:
+    name: kafka-net
+
+volumes:
+  emqx_data:
+  emqx_log:
+  timescale_data:

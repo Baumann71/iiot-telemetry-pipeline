@@ -1,0 +1,79 @@
+## Reemplaza el etc/base.hocon de la imagen emqx/emqx:6.3 (montado en el compose).
+## Orden de precedencia de EMQX: etc/base.hocon < cluster.hocon < emqx.conf < variables de entorno
+## Por ser "base", lo que se cambie despues desde el dashboard queda en cluster.hocon
+## (volumen emqx_data) y pisa a esto. En un clon limpio (volumen vacio) el puente aparece solo.
+##
+## Exportado de la config armada en el dashboard con:
+##   docker exec emqx_proy1 /opt/emqx/bin/emqx ctl conf show connectors   (y actions, rule_engine)
+## Solo se dejaron los valores que no son por defecto.
+
+## ---- contenido original del base.hocon de la imagen ----
+log {
+    file {
+        # level = warning
+    }
+    console {
+        # level = warning
+    }
+}
+
+dashboard {
+    listeners {
+        http.bind = 18083
+        https {
+            ssl_options {
+                certfile = "${EMQX_ETC_DIR}/certs/cert.pem"
+                keyfile = "${EMQX_ETC_DIR}/certs/key.pem"
+            }
+        }
+    }
+}
+
+## ---- puente MQTT -> Kafka ----
+
+## Connector: la conexion al cluster de Kafka.
+connectors.kafka_producer.kafka {
+    # En local los brokers estan en la misma red de Docker (kafka-net).
+    # Para la exposicion (Kafka en la VM) el compose lo pisa con la variable de entorno
+    # EMQX_CONNECTORS__KAFKA_PRODUCER__KAFKA__BOOTSTRAP_HOSTS (sale de KAFKA_BOOTSTRAP_HOSTS del .env).
+    # Nota: ${?VAR} de HOCON no funciona aca, EMQX no lo reemplaza con el entorno.
+    bootstrap_hosts = "kafka-1:9092,kafka-2:9092,kafka-3:9092"
+    authentication = none
+    # los topics se crean con kafka-init, no al primer uso
+    allow_auto_topic_creation = false
+}
+
+## Action: como se escribe en Kafka cada mensaje que sale de la regla.
+actions.kafka_producer.kafka_local {
+    connector = kafka
+    description = "para dirigis el topico de scada de los devices al topico telemetria raw de kafka"
+    parameters {
+        topic = "telemetria.raw"
+        message {
+            key = "${pozo_id}"          # sale de la regla (2do nivel del topic MQTT)
+            value = "${payload}"        # el JSON del gateway tal cual
+            timestamp = "${.timestamp}" # hora de recepcion en EMQX
+        }
+        # la particion la elige EMQX: erlang:phash2(key) rem particiones
+        # (no es el murmur2 de los clientes de Kafka)
+        partition_strategy = key_dispatch
+        required_acks = all_isr         # equivalente a acks=all
+        max_retries = infinity          # con Kafka caido reintenta, no descarta
+        # buffer en memoria: si EMQX se reinicia con Kafka caido, lo encolado se pierde
+        buffer.mode = memory
+        query_mode = async
+    }
+}
+
+## Regla: toma los mensajes de los pozos y deriva la key del topic scada/<pozo_id>/<sensor>.
+rule_engine.rules.scada_a_kafka {
+    actions = ["kafka_producer:kafka_local"]
+    description = "scada/<pozo>/<sensor> -> telemetria.raw con key pozo_id"
+    sql = """~
+      SELECT
+        nth(2, split(topic, '/')) AS pozo_id,
+        payload,
+        timestamp
+      FROM "scada/#"
+    ~"""
+}

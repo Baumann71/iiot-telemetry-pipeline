@@ -1,0 +1,273 @@
+#vamos a configurar un compose de kafka, con 3 brokers, cada broker tiene su propio container
+#docker no sabe que es kafka ni que se trata de un cluster, 
+#entonces la configuracion de cada servicio es esencial para hacer el cluster de nodos
+
+# Nombre de proyecto propio: separa contenedores, red y volúmenes de los del
+# docker-compose.yml (EMQX). Así un "down" de uno no toca al otro.
+name: kafka-cluster
+
+###########################################################################
+# Bloque de variables compartidas por los 3 brokers.
+  # "x-" = campo de extension, estas var las ignora docker y sirven para guardar config reutilizable
+  #"&nombre" define un ancla para poder referenciarlo despuies
+  # "*nombre" inserta el contenido del ancla en otro lugar del archivo
+  # <<: (Merge key): En YAML/Compose, permite fusionar las claves de un ancla dentro de un diccionario y sobrescribir valores puntuales si hace falta.
+###################################################################
+
+#este bloque va a tener config de var reutuilzadas en cada nodo, par no repetir info
+x-kafka-env: &kafka-env
+
+  #identificado del cluster, el mismo en los 3 nodos
+    #permite reconocer nodos del cluster como parte del mismo cluster
+    #esta config se guarda en el volumen de cada nodo, si luego se cambia entonces compose down -v
+  CLUSTER_ID: ${KAFKA_CLUSTER_ID:-4L6g3nShT-eMCtK--X86sw}
+
+  #roles del nodo
+    #broker: atiende a Pub y Sub, y guarda los datos
+    #controller: participa del quorum que gestiona los metadatos del cluster (quien es el lider de cada particion, topics etc)
+    #en este caso cada nodo va a ser ambos roles, si fuese un sistema mas grande con mas nodos
+    #entonces tiene sentido que no todos cumplan ambas funciones
+  KAFKA_PROCESS_ROLES: broker,controller
+
+
+  #declaramos que brokrs participan del quorum de controladores (algoritmo raft)
+  #con formato <KAFKA_NODE_ID>@<host>:<port>
+  #port 9093 es donde el broker escucha al controller, sirve para trafico de raft entre controllers (quorums, cotos, replicacion del log)
+  KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka-1:9093,2@kafka-2:9093,3@kafka-3:9093
+
+  # Cuál de los listeners de abajo es el del quórum KRaft (comunicación entre
+  # controladores). Por convención se llama CONTROLLER.
+  KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+
+  # Cuál de los listeners usan los brokers para hablar entre sí (replicación de
+  # particiones entre brokers).
+  KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+
+  # KAFKA_LISTENERS abre los puertos dentro del contenedor. Es igual en los 3 brokers: 9092, 29092 y 9093.
+    #"0.0.0.0" (o vacío) = escuchar en todas las interfaces del contenedor.
+  #esto define que puerto se usa para atender cada necesidas las cuales son:  
+  #   PLAINTEXT  :9092  -> clientes y brokers DENTRO de la red de Docker
+  #   EXTERNAL   :29092 -> clientes en el HOST (herramientas, scripts, la VM)
+  #   CONTROLLER :9093  -> comunicación del quórum KRaft entre los nodos
+  KAFKA_LISTENERS: PLAINTEXT://:9092,EXTERNAL://:29092,CONTROLLER://:9093
+
+  #aca definimos el protocolo de seguridad de cad alistener, voy a poner todos en plaintext por tema de tiempos
+  #sin tls ni auth ni acls. Cualquiera que llegue al puerto puede leer y escribir
+  KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+
+  #factor de replicacion, cada topico tiene N particiones, cada particion va a tener 3 replicas (en total)
+  KAFKA_DEFAULT_REPLICATION_FACTOR: 3
+
+  #MIR: minimo de replicas en sincronizacion, sirve de guardia para que si hacen un ack=all y el umbral de ISR
+  #es inferior, entonces por seguridad se rechaza la publicacion
+  KAFKA_MIN_INSYNC_REPLICAS: 2
+
+
+  #kafka tiene topicos internos, entre estos esta el topico que maneja los offset de cada consumer group
+  #si este topic solo vivie en un broker entonces si se cae dejaria de funcionar la lectura para ese consumer group
+  #por ende hacemos replicas tambien
+  #este topic es __consumer_offsets
+  #usa el MIR general o sea el de KAFKA_MIN_INSYNC_REPLICAS 
+  KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
+
+  KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 3
+  KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 2
+
+  #no creamos topics auto al primer uso, los topcis se crean a mano con sus particioens y retenciones concretas bajo
+  #un script
+  KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+
+  #memoria ram de cada broker, x defecto kafka 1gb cada uno, aca lo reducimos porque la VM no tiene mucha ram
+  KAFKA_HEAP_OPTS: ${KAFKA_HEAP_OPTS:--Xms256m -Xmx256m}
+
+  #dnde guarda cada broker el log de los topics. Debe coincidir con el
+  # volumen montado si no, los datos quedan en /tmp del contenedor y se
+  # pierden al recrearlo.
+  KAFKA_LOG_DIRS: /var/lib/kafka/data
+
+#attrs comunes de los 3 brokers
+x-kafka-common: &kafka-common
+
+  #fijamos la version, si usamos latest cada que salga una nueva version se va a actualizar en el sig docker compsoe up
+  image: apache/kafka:${KAFKA_VERSION:?definir KAFKA_VERSION en el .env x ej 4.4.0}
+
+  #si falla elr proceso reiniciamos el proceso (no cuenta si lo detenes vos)
+  restart: unless-stopped
+
+  #Tope de memoria del contenedor (el heap más memoria fuera del heap:
+  #buffers, caché de páginas, metadatos). Con 3 brokers en una máquina de
+  #4 GB, no subir mucho esto
+  mem_limit: ${KAFKA_MEM_LIMIT:-640m}
+
+  #"Estar sano" = el broker responde a una consulta de API. Sirve para que los
+  # servicios que dependen de Kafka (kafka-init, la UI) esperen a que esté listo
+  # y no solo a que el contenedor haya arrancado.
+  healthcheck:
+    # KAFKA_HEAP_OPTS=-Xmx64m: el chequeo lanza una JVM aparte que, si no, hereda
+    # el heap de 256 MB del broker y compite con él dentro del mem_limit.
+    test: ["CMD-SHELL", "KAFKA_HEAP_OPTS=-Xmx64m /opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 > /dev/null 2>&1"]
+    interval: 15s
+    timeout: 10s
+    retries: 9
+    start_period: 30s
+
+
+services:
+  kafka-1: 
+    <<: *kafka-common
+    container_name: kafka-1
+
+    #nombre con el que otros nodos y clientes encuentran al broker dentro de la red de DOCKER, coincide con el de QUORUM_VOTERS
+    hostname: kafka-1
+
+    ports:
+      # KAFKA_BIND_IP: vacío en local (permite todas las interfaces, IPv4 e IPv6). En la VM solo la IP de Tailscale para no
+      # publicar el puerto en la interfaz pública
+      - "${KAFKA_BIND_IP:-}:29092:29092" #con esto un cliente puede alcaznar al broker por el listner EXTERNAL
+    
+    environment:
+      <<: *kafka-env
+
+      #id del nodo en el cluster, coincide con el QUORUM_VOTERS
+      KAFKA_NODE_ID: 1
+
+
+      # ADVERTISED LISTENERS: la dirección que cada broker declara para que lo
+      # encuentren los clientes. El controller la guarda con los metadatos y
+      # cualquier broker le entrega al cliente TODA info del controller que le sirva 
+      #o sea ips de brokers (las que cada uno declaro en KAFKA_ADVERTISED_LISTENERS), topicos existentes
+      # y lider de cada particion. 
+      #El cliente usa estas direcciones para conectarse a cada broker, no la de bootstrap.servers.
+      #Tiene que ser alcanzable desde el cliente:
+        #  PLAINTEXT -> nombre del contenedor, válido solo dentro de Docker
+        #  EXTERNAL  -> localhost desde el host; en la VM, poner la IP de Tailscale en KAFKA_EXTERNAL_HOST
+      #el controller port no se incluye en la lista de advertised listeners, ya lo definimos en la de kafka controller quorum voters
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-1:9092,EXTERNAL://${KAFKA_EXTERNAL_HOST:-localhost}:29092
+
+    volumes:
+      #guarda datos de los topics y los metadatos
+      - kafka-1-data:/var/lib/kafka/data
+  
+  kafka-2: 
+    <<: *kafka-common
+    container_name: kafka-2
+
+    #nombre con el que otros nodos y clientes encuentran al broker dentro de la red de DOCKER, coincide con el de QUORUM_VOTERS
+    hostname: kafka-2
+
+    ports:
+      - "${KAFKA_BIND_IP:-}:29093:29092" #29093 porque brokers viven en la misma VM comparten externals ports y el 92 lo ocupa el kakfka 1
+    
+    environment:
+      <<: *kafka-env
+
+      #id del nodo en el cluster, coincide con el QUORUM_VOTERS
+      KAFKA_NODE_ID: 2
+
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-2:9092,EXTERNAL://${KAFKA_EXTERNAL_HOST:-localhost}:29093
+
+    volumes:
+      #guarda datos de los topics y los metadatos
+      - kafka-2-data:/var/lib/kafka/data
+    
+
+  kafka-3:
+    <<: *kafka-common
+    container_name: kafka-3
+    hostname: kafka-3
+    ports:
+      - "${KAFKA_BIND_IP:-}:29094:29092"
+    environment:
+      <<: *kafka-env
+      KAFKA_NODE_ID: 3
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-3:9092,EXTERNAL://${KAFKA_EXTERNAL_HOST:-localhost}:29094
+    volumes:
+      - kafka-3-data:/var/lib/kafka/data
+
+
+
+  #continer para crear topics, corre una vez crea topics y termina
+  #--if-not-exists tal que si ya existen no falla
+  kafka-init:
+    image: apache/kafka:${KAFKA_VERSION:?definir KAFKA_VERSION en .env}
+    container_name: kafka-init
+
+    # Espera a que los 3 brokers estén sanos antes de arrancar.
+    depends_on:
+      kafka-1:
+        condition: service_healthy
+      kafka-2:
+        condition: service_healthy
+      kafka-3:
+        condition: service_healthy
+
+    # Este contenedor no debe reiniciarse: hace su trabajo y termina.
+    restart: "no"
+
+    # Se reemplaza el arranque de Kafka de la imagen por un script de bash.
+    # "$$" es un "$" escapado para que Compose no lo interprete.
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        set -e
+        BS=kafka-1:9092,kafka-2:9092,kafka-3:9092
+        KT=/opt/kafka/bin/kafka-topics.sh
+
+        # --partitions: cuántas particiones (paralelismo y orden por key).
+        # --replication-factor 3: cada partición en los 3 brokers.
+        # min.insync.replicas=2: mínimo de réplicas sincronizadas para escribir.
+        # retention.ms=604800000: 7 días de historial (lo que define cuánto se
+        # puede reprocesar con el grupo v2).
+
+        # Telemetría de los pozos. Key = pozo_id. 6 particiones.
+        $$KT --bootstrap-server $$BS --create --if-not-exists \
+          --topic telemetria.raw --partitions 6 --replication-factor 3 \
+          --config min.insync.replicas=2 --config retention.ms=604800000
+
+        # Mensajes inválidos descartados por el grupo v1.
+        $$KT --bootstrap-server $$BS --create --if-not-exists \
+          --topic telemetria.descartes --partitions 3 --replication-factor 3 \
+          --config min.insync.replicas=2 --config retention.ms=604800000
+
+        # Extras: clima (misma retención que telemetria.raw para que el replay
+        # use el clima de la época) y acuses del operador.
+        $$KT --bootstrap-server $$BS --create --if-not-exists \
+          --topic clima.pozos --partitions 3 --replication-factor 3 \
+          --config min.insync.replicas=2 --config retention.ms=604800000
+        $$KT --bootstrap-server $$BS --create --if-not-exists \
+          --topic alertas.acks --partitions 3 --replication-factor 3 \
+          --config min.insync.replicas=2 --config retention.ms=604800000
+
+        echo "Topics creados:"
+        $$KT --bootstrap-server $$BS --list
+
+  
+  #seteamos un dashboard, es similar a lo que tiene emqx
+  kafka-ui:
+    # Versión fija (verificada con apache/kafka 4.4.0), no latest.
+    image: ghcr.io/kafbat/kafka-ui:${KAFKA_UI_VERSION:-v1.5.1}
+    container_name: kafka-ui
+    # Tope de memoria: sin límite la JVM de la UI tomaba ~460 MB.
+    mem_limit: ${KAFKA_UI_MEM_LIMIT:-512m}
+    depends_on:
+      kafka-1:
+        condition: service_healthy
+    ports:
+      - "8090:8080"   # UI en http://localhost:8090
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      # Se le dan los 3 brokers: si uno cae, la UI sigue funcionando.
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka-1:9092,kafka-2:9092,kafka-3:9092
+    restart: unless-stopped
+
+# Red con nombre fijo, compartida con docker-compose.yml (EMQX), para que en
+# local el EMQX llegue a kafka-1:9092,kafka-2:9092,kafka-3:9092. Está declarada
+# igual en los dos archivos: la crea el primero que se levante.
+networks:
+  default:
+    name: kafka-net
+
+volumes:
+  kafka-1-data:
+  kafka-2-data:
+  kafka-3-data:
