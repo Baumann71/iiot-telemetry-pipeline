@@ -49,6 +49,32 @@ services:
       retries: 10
     restart: unless-stopped
 
+  grafana:
+    image: grafana/grafana:${GRAFANA_VERSION:?definir GRAFANA_VERSION en el .env}
+    container_name: grafana
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    ports:
+      - "3000:3000"   # http://localhost:3000
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?definir en .env}
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      # las lee el datasource provisionado (grafana/provisioning/datasources)
+      POSTGRES_USER: ${POSTGRES_USER:?definir en .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?definir en .env}
+      POSTGRES_DB: ${POSTGRES_DB:-telemetria}
+    volumes:
+      - grafana_data:/var/lib/grafana   # usuarios, preferencias, cambios hechos desde la UI
+      # datasource versionado en el repo: se carga solo al arrancar
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      # dashboards JSON versionados en el repo (los carga provisioning/dashboards/dashboards.yml)
+      - ./grafana/dashboard:/var/lib/grafana/dashboards:ro
+    mem_limit: ${GRAFANA_MEM_LIMIT:-256m}
+    restart: unless-stopped
+
 
 
 # Misma red que docker-compose.kafka.yml: en local el conector de EMQX usa
@@ -62,3 +88,4 @@ volumes:
   emqx_data:
   emqx_log:
   timescale_data:
+  grafana_data:

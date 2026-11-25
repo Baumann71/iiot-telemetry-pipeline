@@ -9,6 +9,8 @@ import psycopg
 from psycopg import sql
 import json
 from datetime import datetime
+from validacion import validar, MensajeInvalido
+from calidad import calificar, N_CONGELADO
 
 load_dotenv()  
 
@@ -27,10 +29,35 @@ LOTE_S=60 #frecuencia con la que se publica el microbatch, defini 1m en llugar d
 TOPIC = "telemetria.raw"
 
 INSERT = sql.SQL("""
-        INSERT INTO {} (ts, pozo_id, sensor, valor, kafka_part, kafka_offset)
-        VALUES (%s, %s, %s, %s, %s, %s)
-        ON CONFLICT (pozo_id, ts, sensor) DO NOTHING 
+        INSERT INTO {} (ts, pozo_id, sensor, valor, calidad, calidad_motivo, kafka_part, kafka_offset)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (pozo_id, ts, sensor) DO NOTHING
     """).format(sql.Identifier(TABLA)) #el on conflit do nothing es la garantia de idempotencia en caso de tener duplicados
+
+#ultimas N_CONGELADO lecturas de cada (pozo, sensor) de la MISMA tabla que escribe este grupo
+#(v2 arranca con su tabla vacia, o sea sin estado, igual que si fuera la primera vez)
+#el filtro de 8 dias (retencion de telemetria.raw = 7) evita recorrer toda la hypertable
+ULTIMAS = sql.SQL("""
+        SELECT pozo_id, sensor, ts, valor FROM (
+            SELECT pozo_id, sensor, ts, valor,
+                   row_number() OVER (PARTITION BY pozo_id, sensor ORDER BY ts DESC) AS n
+            FROM {} WHERE ts > now() - INTERVAL '8 days'
+        ) t
+        WHERE n <= %s
+        ORDER BY pozo_id, sensor, ts
+    """).format(sql.Identifier(TABLA))
+
+def cargar_estado(conn):
+    #el estado de calidad vive en memoria; al arrancar se reconstruye pasando por calificar()
+    #las ultimas lecturas guardadas, asi el primer lote se compara contra el ultimo del lote anterior
+    estado = {}
+    with conn.cursor() as cur:
+        cur.execute(ULTIMAS, (N_CONGELADO,))
+        for pozo_id, sensor, ts, valor in cur:
+            clave = (pozo_id, sensor)
+            _, estado[clave] = calificar(sensor, valor, ts, estado.get(clave))
+    conn.commit() #cierra la transaccion de lectura
+    return estado
 
 def escribir_lote(micro_batch, conn):
     with conn.cursor() as curr:
@@ -47,6 +74,10 @@ def main():
 
     conn = psycopg.connect(host=PG_HOST, port=PG_PORT, dbname=PG_DB,
                         user=PG_USER, password=PG_PASSWORD)
+    #(pozo, sensor) -> calidad.Previo: estado minimo entre lotes para calificar
+    estado = cargar_estado(conn)
+    print(f"estado de calidad cargado desde {TABLA}: {len(estado)} sensores")
+
     consumer = Consumer(config)
     consumer.subscribe([TOPIC])
 
@@ -54,6 +85,10 @@ def main():
         while True:
             time_pub_microbatch = time.time()
             datos = []
+            #el lote califica sobre una COPIA del estado: si el proceso muere antes de escribir,
+            #Kafka reentrega el lote y el estado tiene que estar como antes de procesarlo
+            #(los Previo son inmutables, alcanza con copiar el dict)
+            estado_lote = dict(estado)
             while not (time.time() - time_pub_microbatch >= LOTE_S):
                 try:
                     msg = consumer.poll(timeout=1.0)
@@ -64,25 +99,22 @@ def main():
                             continue
                         print(f"Error: {msg.error()}")
                         continue
+                    
+                    try:
+                        lectura = validar(msg.key(), msg.value())
+                    except MensajeInvalido as e:
+                        print(f"descartado particion: {msg.partition()} offset: {msg.offset()}: {e}")
+                        continue
+              
+                    clave = (lectura.pozo_id, lectura.sensor)
+                    calif, estado_lote[clave] = calificar(
+                        lectura.sensor, lectura.valor, lectura.ts, estado_lote.get(clave))
 
-                    clave = msg.key().decode("utf-8") if msg.key() else None
-                    valor = msg.value().decode("utf-8") if msg.value() else None
-                    print(
-                        f"Tópico: {msg.topic()} | Partición: {msg.partition()} | "
-                        f"Offset: {msg.offset()} | Clave: {clave} | Valor: {valor}"
-                    )
-                    
-                    
-                    d_json = json.loads(valor)
-                    fila = (
-                        datetime.fromisoformat(d_json["ts"]),   # si no es fecha válida, salta acá
-                        d_json["pozo_id"],
-                        d_json["sensor"],
-                        float(d_json["valor"]),
-                        msg.partition(),
-                        msg.offset(),
-                    )
-                    datos.append(fila)
+                    datos.append((
+                        lectura.ts, lectura.pozo_id, lectura.sensor, lectura.valor,
+                        calif.calidad, calif.motivo,
+                        msg.partition(), msg.offset()
+                    ))
                 except (ValueError, KeyError, TypeError) as e:
                     print(f"descartado particion: {msg.partition()} offset: {msg.offset()}: {e}")
             
@@ -91,7 +123,10 @@ def main():
                 escribir_lote(datos, conn)
                 #ahora que tenemos el commit en la bd hacemos el commit del offset confirmado para nusetro concumser group, asi le avisamos a kafka
                 consumer.commit(asynchronous=False)
-                print(f"lote: {len(datos)} filas, commit hecho")
+                #recien ahora el lote es definitivo: se adopta el estado de calidad que dejo
+                estado = estado_lote
+                malas = sum(1 for d in datos if d[4] == "mala")
+                print(f"lote: {len(datos)} filas ({malas} malas), commit hecho")
             
     except KeyboardInterrupt:
         pass

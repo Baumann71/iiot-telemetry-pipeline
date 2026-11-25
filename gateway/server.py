@@ -35,6 +35,25 @@ LIMITES = {
     "caudal":  (0.0, 400.0),
 }
 
+#eventos esporadicos (anomalias), para que alertas tenga algo que avisar sin intervencion manual
+#cantidad esperada de eventos por hora en TODA la planta (no por pozo)
+#apagado por defecto (0): asi el sistema es predecible para quien corrige el repo
+EVENTOS_POR_HORA = float(os.getenv("EVENTOS_POR_HORA", "0"))
+
+#tipo de evento -> (variable afectada, valor al que se va durante el evento)
+#los objetivos cruzan a proposito los umbrales de consumidores/alertas.py
+#(presion > 100, temperatura > 100, caudal < 30) y quedan dentro de LIMITES
+#y del rango fisico de consumidores/validacion.py, o sea son datos validos
+EVENTOS = {
+    "sobrepresion":       ("presion", 130.0),
+    "sobrecalentamiento": ("temp",    110.0),
+    "bomba detenida":     ("caudal",   10.0),
+}
+DURACION_EVENTO_S = (20.0, 40.0)   #duracion al azar entre estos dos valores
+#durante el evento el valor va rapido al objetivo (k grande); al terminar vuelve
+#a su base con el k normal, o sea de forma gradual
+K_EVENTO = 0.3
+
 def _a_registros(valor):
     #un float32 -> 2 registros de 16 bits
     return AsyncModbusTcpClient.convert_to_registers(valor, AsyncModbusTcpClient.DATATYPE.FLOAT32)
@@ -68,11 +87,40 @@ async def simular(server, periodo=1.0):
     k = 0.05
     ruido = {"presion": 0.8, "temp": 0.3, "caudal": 3.0}
 
+    #evento en curso por pozo: i -> (tipo, variable, objetivo, momento de fin); un evento a la vez por pozo
+    eventos = {}
+    #probabilidad por pozo y por tick, para que en total haya EVENTOS_POR_HORA en la planta
+    prob_evento = EVENTOS_POR_HORA * periodo / 3600 / len(ids)
+    loop = asyncio.get_running_loop()
+    if prob_evento > 0:
+        print(f"Eventos esporadicos activados: ~{EVENTOS_POR_HORA:g} por hora en total")
+
     while True:
+        ahora = loop.time()
         for i in ids:
+            pozo = f"pozo-{i:02d}"   #mismo nombre que usa el gateway
+
+            #fin del evento en curso
+            if i in eventos and ahora >= eventos[i][3]:
+                print(f"[evento] {pozo}: termina {eventos[i][0]}, vuelve gradualmente a su valor normal")
+                del eventos[i]
+
+            #inicio de un evento nuevo
+            if i not in eventos and random.random() < prob_evento:
+                tipo = random.choice(list(EVENTOS))
+                var, objetivo = EVENTOS[tipo]
+                duracion = random.uniform(*DURACION_EVENTO_S)
+                eventos[i] = (tipo, var, objetivo, ahora + duracion)
+                print(f"[evento] {pozo}: {tipo} ({var} hacia {objetivo:g}) por {duracion:.0f} s")
+
             e = estado[i]
             for var in e:
-                e[var] += k * (base[i][var] - e[var]) + random.uniform(-ruido[var], ruido[var])
+                #si hay un evento sobre esta variable, se va hacia el objetivo del evento en vez de su base
+                if i in eventos and eventos[i][1] == var:
+                    objetivo, kv = eventos[i][2], K_EVENTO
+                else:
+                    objetivo, kv = base[i][var], k
+                e[var] += kv * (objetivo - e[var]) + random.uniform(-ruido[var], ruido[var])
                 lo, hi = LIMITES[var]
                 e[var] = max(lo, min(hi, e[var]))
 

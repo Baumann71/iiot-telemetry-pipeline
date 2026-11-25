@@ -1,0 +1,13 @@
+# Carga los dashboards JSON de grafana/dashboard/ (montada en /var/lib/grafana/dashboards).
+# Para cambiar un dashboard: editarlo en la UI, Export -> Export as JSON
+# ("Export for sharing externally" apagado) y reemplazar el archivo del repo.
+apiVersion: 1
+
+providers:
+  - name: telemetria
+    type: file
+    disableDeletion: true     # no se puede borrar desde la UI
+    allowUiUpdates: false     # la fuente de verdad es el JSON del repo
+    updateIntervalSeconds: 30 # relee la carpeta: reemplazar el JSON alcanza, sin reiniciar
+    options:
+      path: /var/lib/grafana/dashboards

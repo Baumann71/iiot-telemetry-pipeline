@@ -1,0 +1,24 @@
+# Datasource de TimescaleDB, cargado por Grafana al arrancar.
+# Las variables $POSTGRES_* las pasa el docker-compose.yml desde el .env.
+apiVersion: 1
+
+datasources:
+  - name: TimescaleDB
+    uid: timescaledb            # uid fijo: los dashboards lo referencian por acá
+    type: grafana-postgresql-datasource
+    access: proxy
+    url: timescaledb:5432       # nombre del servicio en la red de Docker
+    user: $POSTGRES_USER
+    jsonData:
+      database: $POSTGRES_DB
+      sslmode: disable
+      postgresVersion: 1600     # imagen timescaledb ...-pg16
+      timescaledb: true         # habilita time_bucket en el editor de consultas
+      # $__interval nunca baja de esto en ningún panel: el gateway publica cada 5 s,
+      # así en rangos cortos cada punto es una lectura (sin tramos vacíos) y en rangos
+      # largos Grafana igual agranda el tramo para no traer de más
+      timeInterval: "5s"
+    secureJsonData:
+      password: $POSTGRES_PASSWORD
+    isDefault: true
+    editable: false
