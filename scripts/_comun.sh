@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Funciones compartidas por los scripts de la exposición. No se ejecuta solo:
+# Funciones compartidas por los scripts de operación. No se ejecuta solo:
 # lo cargan los demás con "source".
 
 set -euo pipefail

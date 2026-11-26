@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Control de huecos y duplicados de una tabla de lecturas contra los offsets de Kafka.
-#   scripts-expo/control.sh                 -> lecturas_v1
-#   scripts-expo/control.sh lecturas_v2
+#   scripts/control.sh                 -> lecturas_v1
+#   scripts/control.sh lecturas_v2
 #
 # Por cada partición compara las filas en la base contra el rango de offsets que
 # llegaron (max - min + 1). Si coinciden, no se saltó ningún mensaje. En la base
@@ -12,7 +12,7 @@
 #   - el mensaje era un DUPLICADO en Kafka y el ON CONFLICT DO NOTHING lo ignoró.
 #     Pasa en un failover: EMQX no recibe la confirmación, reenvía, y el log queda
 #     con el mismo mensaje dos veces (su productor no es idempotente).
-# Para ver cuáles son: scripts-expo/sql.sh "SELECT g FROM generate_series(<min>,<max>) g
+# Para ver cuáles son: scripts/sql.sh "SELECT g FROM generate_series(<min>,<max>) g
 #   WHERE g NOT IN (SELECT kafka_offset FROM lecturas_v1 WHERE kafka_part=<p>);"
 
 source "$(dirname "$0")/_comun.sh"

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Offsets y lag de los consumer groups sobre el mismo topic.
-#   scripts-expo/grupos.sh                  -> v1 y alertas
-#   scripts-expo/grupos.sh v1 v2
+#   scripts/grupos.sh                  -> v1 y alertas
+#   scripts/grupos.sh v1 v2
 #
 # Muestra que cada grupo lleva su propia posición en el log: v1 avanza de a
 # lotes (el lag sube y baja), alertas va al día.

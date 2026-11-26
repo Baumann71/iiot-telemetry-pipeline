@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Provocar y revertir la caída de un broker.
-#   scripts-expo/broker.sh caer 2        -> mata kafka-2 de golpe (docker kill, sin apagado ordenado)
-#   scripts-expo/broker.sh levantar 2    -> lo vuelve a arrancar
-#   scripts-expo/broker.sh estado        -> qué brokers corren, y líder e ISR de cada partición
+#   scripts/broker.sh caer 2        -> mata kafka-2 de golpe (docker kill, sin apagado ordenado)
+#   scripts/broker.sh levantar 2    -> lo vuelve a arrancar
+#   scripts/broker.sh estado        -> qué brokers corren, y líder e ISR de cada partición
 #
 # "caer" usa docker kill a propósito: simula una falla real. Con docker stop el
 # broker haría un apagado controlado y movería el liderazgo antes de irse.

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Consulta a TimescaleDB.
-#   scripts-expo/sql.sh                          -> abre psql interactivo
-#   scripts-expo/sql.sh "SELECT count(*) FROM lecturas_v1;"
+#   scripts/sql.sh                          -> abre psql interactivo
+#   scripts/sql.sh "SELECT count(*) FROM lecturas_v1;"
 
 source "$(dirname "$0")/_comun.sh"
 
