@@ -1,12 +1,16 @@
+### Levantar compose
+* docker compose -f docker-compose.kafka.yml up -d
+* docker compose up -d
 
-
+### Dar de baja un broker
+* docker kill kafka-N <- esto simula una flla real, por eso no uso el stop
+* docker start kafka-N <- lo levanta 
+* 
 ### para entrar a timescaldb:
 * docker exec -it timescaledb psql -U root -d telemetria
     * \dt <- show tables>
 
-### Scripts (`scripts-expo/`, correr desde la raíz del repo, en Git Bash/Linux/Mac)
-
-Usuario y base de Postgres salen del `.env`. Las herramientas de Kafka se ejecutan dentro del primer broker que siga vivo, así que funcionan aunque haya brokers caídos.
+### Scripts (`scripts-expo/`()
 
 | Comando | Qué muestra |
 |---|---|
@@ -30,8 +34,3 @@ uv run python -c "import json,datetime,paho.mqtt.publish as p; p.single('scada/p
 
 ### Demo consumidor V2:
 GROUP_ID=v2 TABLA=lecturas_v2 uv run consumidores/consumidor-timescale.py
-### Migración de calidad (solo si la base se creó antes de `calidad_motivo`)
-```bash
-scripts-expo/sql.sh "ALTER TABLE lecturas_v1 ADD COLUMN IF NOT EXISTS calidad_motivo TEXT;"
-```
-`lecturas_v2` creada después de esto con `LIKE lecturas_v1 INCLUDING ALL` ya la trae.
